@@ -1,0 +1,10 @@
+{
+   "certcache": {
+      "endpoint": "americas.test.acccache.azure.net",
+      "tee_type": "SevSnpVM",
+      "api_version": "api-version=2020-10-15-preview"
+   },
+   "identity": {
+       "client_id": "b53b5e06-15da-4c4e-9186-0a3919012330"
+   }
+}
