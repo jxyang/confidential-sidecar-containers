@@ -3,11 +3,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
-	//"fmt"
 	"log"
 	"net"
 	"os"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 
 	"encoding/json"
 	"encoding/base64"
@@ -140,9 +143,26 @@ func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProvider
 		log.Fatalf("SKR failed: %v", err)
 	}
 
-	out := new(keyprovider.KeyProviderKeyWrapProtocolOutput)
-	out.KeyProviderKeyWrapProtocolOutput = keyBytes
-	return out, nil
+       //err = os.WriteFile("skrout", keyBytes, 0644)
+
+       key, err := x509.ParsePKCS8PrivateKey(keyBytes)
+       if err != nil {
+                log.Fatalf("Released key is invalid: %v", err)
+        }
+
+       if privkey, ok := key.(*rsa.PrivateKey); ok {
+               plaintext, err := rsa.DecryptPKCS1v15(rand.Reader, privkey, annotation.WrappedData)
+               if err != nil {
+                       log.Fatalf("Decryption failed: %v", err)
+               }
+               //log.Printf("plain text: %v", string(plaintext))
+		 out := new(keyprovider.KeyProviderKeyWrapProtocolOutput)
+		out.KeyProviderKeyWrapProtocolOutput = plaintext
+		return out, nil
+       }
+
+	log.Fatalf("Released key is invalid: %v", err)
+	return nil, errors.New("Released key is invalid")
 }
 
 func main() {
@@ -153,13 +173,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+	log.Printf("Listening on port %v", port)
 
 	bytes, _ := os.ReadFile(json_file)
 	err = json.Unmarshal(bytes, &info)
 	if err != nil {
 		log.Fatalf("Invalid %v: %v", json_file, string(bytes))
 	}
-	log.Printf("Read azure info")
+	log.Printf("Read azure info: %v", info)
 
 	s := grpc.NewServer()
 	keyprovider.RegisterKeyProviderServiceServer(s, &server{})
