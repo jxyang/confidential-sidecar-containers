@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log"
 	"net"
@@ -229,26 +228,25 @@ func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProvider
 		log.Fatalf("SKR failed: %v", err)
 	}
 
-       //err = os.WriteFile("skrout", keyBytes, 0644)
-
        key, err := x509.ParsePKCS8PrivateKey(keyBytes)
        if err != nil {
                 log.Fatalf("Released key is invalid: %v", err)
         }
 
+	var out *keyprovider.KeyProviderKeyWrapProtocolOutput = nil
        if privkey, ok := key.(*rsa.PrivateKey); ok {
-               plaintext, err := rsa.DecryptPKCS1v15(rand.Reader, privkey, annotation.WrappedData)
+               plaintext, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privkey, annotation.WrappedData, nil)
                if err != nil {
                        log.Fatalf("Decryption failed: %v", err)
                }
-               //log.Printf("plain text: %v", string(plaintext))
-		 out := new(keyprovider.KeyProviderKeyWrapProtocolOutput)
-		out.KeyProviderKeyWrapProtocolOutput = plaintext
-		return out, nil
-       }
 
-	log.Fatalf("Released key is invalid: %v", err)
-	return nil, errors.New("Released key is invalid")
+		out = new(keyprovider.KeyProviderKeyWrapProtocolOutput)
+		out.KeyProviderKeyWrapProtocolOutput = plaintext
+       } else {
+		log.Fatalf("Released key is not a RSA private key: %v", err)
+	}
+
+	return out, nil
 }
 
 func main() {
