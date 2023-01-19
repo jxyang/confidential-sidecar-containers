@@ -10,10 +10,12 @@ import (
 	"os"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 
 	"encoding/json"
 	"encoding/base64"
+	"encoding/pem"
 	"google.golang.org/grpc"
 	"github.com/Microsoft/confidential-sidecar-containers/pkg/keyprovider"
 	"github.com/Microsoft/confidential-sidecar-containers/pkg/attest"
@@ -66,6 +68,12 @@ type AnnotationPacket struct {
     MaaEndpoint string `json:"maa_endpoint,omitempty"`
 }
 
+type RSAKeyInfo struct {
+    PublicKeyPath string `json:"public_key_path"`
+    MhsmEndpoint string `json:"mhsm_endpoint"`
+    MaaEndpoint string `json:"maa_endpoint"`
+}
+
 type keyProviderInput struct {
     // Operation is either "keywrap" or "keyunwrap"
     // attestation-agent can only handle the case of "keyunwrap"
@@ -85,6 +93,84 @@ func (s *server) SayHello(ctx context.Context, in *keyprovider.HelloRequest) (*k
 	return &keyprovider.HelloReply{Message: "Hello " + in.GetName()}, nil
 }
 
+func (s *server) WrapKey(c context.Context, grpcInput *keyprovider.KeyProviderKeyWrapProtocolInput) (*keyprovider.KeyProviderKeyWrapProtocolOutput, error) {
+	var input keyProviderInput
+	str := string(grpcInput.KeyProviderKeyWrapProtocolInput)
+	err := json.Unmarshal(grpcInput.KeyProviderKeyWrapProtocolInput, &input)
+	if err != nil {
+		log.Fatalf("Ill-formed key provider input: %v. Error: %v", str, err.Error())
+	}
+	log.Printf("Key provider input: %v", input)
+
+	var ec = input.KeyWrapParams.Ec
+	if len(ec.Parameters["attestation-agent"]) == 0 {
+		log.Fatalf("attestation-agent must be specified in the encryption config parameters: %v", ec)
+	}
+	attestation_agent, _ := base64.StdEncoding.DecodeString(ec.Parameters["attestation-agent"][0])
+	log.Printf("Attestation agent name: %v", string(attestation_agent))
+
+	// TODO: use AKV/MHSM/other for decryption based on the attestation-agent parameter
+
+	if len(ec.Parameters["key-id"]) == 0 {
+		log.Fatalf("key-id must be specified in encryption config parameters: %v", ec)
+	}
+
+	var annotation AnnotationPacket
+	annotation.Kid = ec.Parameters["key-id"][0]
+	annotation.Iv = []byte("")
+	annotation.WrapType = "rsa_3072"
+
+	optsdata, err := base64.StdEncoding.DecodeString(input.KeyWrapParams.Optsdata)
+	if err != nil {
+		log.Fatalf("Failed to decode optsdata %v", err)
+	}
+
+	var keyInfo RSAKeyInfo
+	path := "/opt/AAA/" + annotation.Kid + "-info.json"
+	keyInfoBytes, e := os.ReadFile(path)
+	if e != nil {
+		log.Fatalf("Failed to read key info file %v", path)
+	}
+
+	err = json.Unmarshal(keyInfoBytes, &keyInfo)
+	if err != nil {
+		log.Fatalf("Invalid RSA key info file %v", path)
+	}
+
+	annotation.MaaEndpoint = keyInfo.MaaEndpoint
+	annotation.MhsmEndpoint = keyInfo.MhsmEndpoint
+
+	pubpem, e := os.ReadFile(keyInfo.PublicKeyPath)
+	if e != nil {
+		log.Fatalf("Failed to read public key file %v", keyInfo.PublicKeyPath)
+	}
+	block, _ := pem.Decode([]byte(pubpem))
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		log.Fatalf("Invalid public key in %v, error: %v", path, err)
+	}
+
+	var ciphertext []byte
+	if pubkey, ok := key.(*rsa.PublicKey); ok {
+		ciphertext, err = rsa.EncryptOAEP(sha256.New(), rand.Reader, pubkey, optsdata, nil)
+		if err != nil {
+			log.Fatalf("Failed to encrypt with the public key %v", err)
+		}
+	} else {
+		log.Fatalf("Invalid public RSA key in %v", path)
+	}
+
+	annotation.WrappedData = ciphertext
+	 annotationBytes, err := json.Marshal(annotation)
+	 if err != nil {
+		log.Fatalf("Failed to marshall annotation packet: %v", err)
+	}
+
+	out := new(keyprovider.KeyProviderKeyWrapProtocolOutput)
+	out.KeyProviderKeyWrapProtocolOutput =annotationBytes
+	return out, nil
+}
+
 func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProviderKeyWrapProtocolInput) (*keyprovider.KeyProviderKeyWrapProtocolOutput, error) {
 	var input keyProviderInput
 	str := string(grpcInput.KeyProviderKeyWrapProtocolInput)
@@ -98,8 +184,8 @@ func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProvider
 	if len(dc.Parameters["attestation-agent"]) == 0 {
 		log.Fatalf("attestation-agent must be specified in decryption config parameters: %v", str)
 	}
-	attestation_agent_name := dc.Parameters["attestation-agent"][0]
-	log.Printf("Attestation agent name: %v", attestation_agent_name)
+	attestation_agent, _ := base64.StdEncoding.DecodeString(dc.Parameters["attestation-agent"][0])
+	log.Printf("Attestation agent name: %v", string(attestation_agent))
 
 	// TODO: use AKV/MHSM/other for decryption based on the attestation-agent parameter
 
@@ -166,7 +252,7 @@ func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProvider
 }
 
 func main() {
-	json_file := "/azure-info.json"
+	json_file := "/opt/AAA/azure-info.json"
 	port := flag.String("keyprovider_sock", "127.0.0.1:50000", "Port on which the key provider to listen")
 	flag.Parse()
 	lis, err := net.Listen("tcp", *port)
@@ -175,7 +261,11 @@ func main() {
 	}
 	log.Printf("Listening on port %v", port)
 
-	bytes, _ := os.ReadFile(json_file)
+	bytes, err := os.ReadFile(json_file)
+	if err != nil {
+		log.Fatalf("Can't find azure-info.json")
+	}
+
 	err = json.Unmarshal(bytes, &info)
 	if err != nil {
 		log.Fatalf("Invalid %v: %v", json_file, string(bytes))

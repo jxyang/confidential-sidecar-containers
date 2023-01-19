@@ -1,0 +1,5 @@
+{
+    "public_key_path": "/opt/AAA/kata-image-key-pub.pem",
+    "mhsm_endpoint": "accmhsm.managedhsm.azure.net",
+    "maa_endpoint" : "sharedeus2.eus2.attest.azure.net"
+}
