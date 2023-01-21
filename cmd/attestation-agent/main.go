@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log"
 	"net"
+	"strings"
 	"os"
 	"crypto/rand"
 	"crypto/rsa"
@@ -82,6 +83,21 @@ type keyProviderInput struct {
     KeyUnwrapParams KeyUnwrapParams `json:"keyunwrapparams,omitempty"`
 }
 
+type KeyUnwrapResults struct {
+	OptsData []byte `json:"optsdata"`
+}
+
+type KeyWrapResults struct {
+	Annotation []byte `json:"annotation"`
+}
+
+type KeyProviderProtocolOutput struct {
+	// KeyWrapResult encodes the results to key wrap if operation is to wrap
+	KeyWrapResults KeyWrapResults `json:"keywrapresults,omitempty"`
+	// KeyUnwrapResult encodes the result to key unwrap if operation is to unwrap
+	KeyUnwrapResults KeyUnwrapResults `json:"keyunwrapresults,omitempty"`
+}
+
 // server is used to implement helloworld.GreeterServer.
 type server struct {
 	keyprovider.UnimplementedKeyProviderServiceServer
@@ -105,17 +121,21 @@ func (s *server) WrapKey(c context.Context, grpcInput *keyprovider.KeyProviderKe
 	if len(ec.Parameters["attestation-agent"]) == 0 {
 		log.Fatalf("attestation-agent must be specified in the encryption config parameters: %v", ec)
 	}
-	attestation_agent, _ := base64.StdEncoding.DecodeString(ec.Parameters["attestation-agent"][0])
-	log.Printf("Attestation agent name: %v", string(attestation_agent))
+	aaKid, _ := base64.StdEncoding.DecodeString(ec.Parameters["attestation-agent"][0])
+	tokens := strings.Split(string(aaKid), ":")
 
-	// TODO: use AKV/MHSM/other for decryption based on the attestation-agent parameter
-
-	if len(ec.Parameters["key-id"]) == 0 {
-		log.Fatalf("key-id must be specified in encryption config parameters: %v", ec)
+	if len(tokens) < 2 {
+		log.Fatalf("Key id is not provided in the request")
 	}
 
+	aa := tokens[0]
+	kid := tokens[1]
+	log.Printf("Attestation agent: %v, kid: %v", aa, kid)
+
+	// TODO: use AKV/MHSM/other for decryption based on the specific attestation-agent
+
 	var annotation AnnotationPacket
-	annotation.Kid = ec.Parameters["key-id"][0]
+	annotation.Kid = kid
 	annotation.Iv = []byte("")
 	annotation.WrapType = "rsa_3072"
 
@@ -160,14 +180,15 @@ func (s *server) WrapKey(c context.Context, grpcInput *keyprovider.KeyProviderKe
 	}
 
 	annotation.WrappedData = ciphertext
-	 annotationBytes, err := json.Marshal(annotation)
-	 if err != nil {
-		log.Fatalf("Failed to marshall annotation packet: %v", err)
-	}
+	annotationBytes, _ := json.Marshal(annotation)
+	protocolBytes, _ := json.Marshal(KeyProviderProtocolOutput{
+		KeyWrapResults: KeyWrapResults{Annotation: annotationBytes},
+	})
 
-	out := new(keyprovider.KeyProviderKeyWrapProtocolOutput)
-	out.KeyProviderKeyWrapProtocolOutput =annotationBytes
-	return out, nil
+	log.Printf("Return annotation %v", annotation)
+	return &keyprovider.KeyProviderKeyWrapProtocolOutput{
+		KeyProviderKeyWrapProtocolOutput: protocolBytes,
+	}, nil
 }
 
 func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProviderKeyWrapProtocolInput) (*keyprovider.KeyProviderKeyWrapProtocolOutput, error) {
@@ -234,17 +255,23 @@ func (s *server) UnWrapKey(c context.Context, grpcInput *keyprovider.KeyProvider
         }
 
 	var out *keyprovider.KeyProviderKeyWrapProtocolOutput = nil
+	var plaintext []byte
        if privkey, ok := key.(*rsa.PrivateKey); ok {
-               plaintext, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privkey, annotation.WrappedData, nil)
+               plaintext, err = rsa.DecryptOAEP(sha256.New(), rand.Reader, privkey, annotation.WrappedData, nil)
                if err != nil {
                        log.Fatalf("Decryption failed: %v", err)
                }
-
-		out = new(keyprovider.KeyProviderKeyWrapProtocolOutput)
-		out.KeyProviderKeyWrapProtocolOutput = plaintext
        } else {
 		log.Fatalf("Released key is not a RSA private key: %v", err)
 	}
+
+	protocolBytes, _ := json.Marshal(KeyProviderProtocolOutput{
+		KeyUnwrapResults: KeyUnwrapResults{OptsData: plaintext},
+	})
+
+	return &keyprovider.KeyProviderKeyWrapProtocolOutput{
+		KeyProviderKeyWrapProtocolOutput: protocolBytes,
+	}, nil
 
 	return out, nil
 }
@@ -257,7 +284,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	log.Printf("Listening on port %v", port)
+	log.Printf("Listening on port %v", *port)
 
 	bytes, err := os.ReadFile(json_file)
 	if err != nil {

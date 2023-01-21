@@ -1,6 +1,8 @@
 syntax = "proto3";
 
-option go_package = "github.com/container-investigations/confidential-sidecar-containers/pkg/keyprovider";
+option go_package = "./keyprovider";
+
+package keyprovider;
 
 message keyProviderKeyWrapProtocolInput {
     bytes KeyProviderKeyWrapProtocolInput = 1;
